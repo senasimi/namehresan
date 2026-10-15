@@ -1,0 +1,1017 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>سامانه مدیریت بخشنامه‌های مدرسه</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&display=swap');
+        * { font-family: 'Vazirmatn', Tahoma, Arial, sans-serif; }
+        html { direction: rtl; }
+        body { background: #f3f4f6; margin: 0; padding: 0; }
+        .fade-in { animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+        .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 3px; }
+        .modal-overlay { background: rgba(0,0,0,0.5); }
+        .checkbox-item { transition: all 0.2s; }
+        .checkbox-item:hover { background: #eff6ff; }
+        .checkbox-item.checked { background: #dbeafe; border-color: #3b82f6; }
+        .refresh-indicator { animation: pulse 2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    </style>
+</head>
+<body>
+
+<div id="app"></div>
+<div id="loading" class="fixed inset-0 bg-white flex items-center justify-center z-50">
+    <div class="text-center">
+        <div class="w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+        <p class="text-gray-600">در حال بارگذاری...</p>
+    </div>
+</div>
+
+<script>
+// ============ CONFIG ============
+const API_BASE = '';
+const MAX_USERS = 20;
+const AUTO_REFRESH_INTERVAL = 5000;
+
+// ============ API CLIENT ============
+const api = {
+    async getUsers() {
+        const res = await fetch(`${API_BASE}/api/users`);
+        return await res.json();
+    },
+    async addUser(user) {
+        const res = await fetch(`${API_BASE}/api/users`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(user),
+        });
+        return await res.json();
+    },
+    async deleteUser(userId) {
+        const res = await fetch(`${API_BASE}/api/users/${userId}`, { method: 'DELETE' });
+        return await res.json();
+    },
+    async getMessages() {
+        const res = await fetch(`${API_BASE}/api/messages`);
+        return await res.json();
+    },
+    async addMessage(message) {
+        const res = await fetch(`${API_BASE}/api/messages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(message),
+        });
+        return await res.json();
+    },
+    async updateMessage(msgId, updates) {
+        const res = await fetch(`${API_BASE}/api/messages/${msgId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updates),
+        });
+        return await res.json();
+    },
+    async deleteMessage(msgId) {
+        const res = await fetch(`${API_BASE}/api/messages/${msgId}`, { method: 'DELETE' });
+        return await res.json();
+    },
+    async init() {
+        const res = await fetch(`${API_BASE}/api/init`, { method: 'POST' });
+        return await res.json();
+    },
+};
+
+// ============ UTILS ============
+function generateId() {
+    return Date.now().toString(36) + Math.random().toString(36).substr(2);
+}
+
+function formatDate(dateStr) {
+    const date = new Date(dateStr);
+    return new Intl.DateTimeFormat('fa-IR', {
+        year: 'numeric', month: 'long', day: 'numeric',
+        hour: '2-digit', minute: '2-digit'
+    }).format(date);
+}
+
+// ============ APP STATE ============
+let currentUser = null;
+let users = [];
+let messages = [];
+let adminTab = 'send';
+let userFilter = 'all';
+let adminFilterUser = 'all';
+let adminFilterStatus = 'all';
+let selectedMessage = null;
+let editingMessage = null;
+let notification = '';
+let notificationTimeout = null;
+let selectedRecipients = [];
+let autoRefreshTimer = null;
+let lastDataHash = '';
+
+// ============ DATA MANAGEMENT ============
+async function loadData() {
+    try {
+        const [usersData, messagesData] = await Promise.all([
+            api.getUsers(),
+            api.getMessages(),
+        ]);
+        const newHash = JSON.stringify({ users: usersData, messages: messagesData });
+        if (newHash !== lastDataHash) {
+            users = usersData;
+            messages = messagesData;
+            lastDataHash = newHash;
+            return true;
+        }
+        return false;
+    } catch (error) {
+        console.error('Error loading data:', error);
+        return false;
+    }
+}
+
+async function initializeApp() {
+    try {
+        let data = await loadData();
+        if (users.length === 0) {
+            await api.init();
+            await loadData();
+        }
+        const saved = sessionStorage.getItem('currentUser');
+        if (saved) {
+            currentUser = JSON.parse(saved);
+        }
+        document.getElementById('loading').style.display = 'none';
+        render();
+        startAutoRefresh();
+    } catch (error) {
+        console.error('Error initializing:', error);
+        document.getElementById('loading').innerHTML = `
+            <div class="text-center p-8">
+                <div class="text-6xl mb-4">⚠️</div>
+                <h2 class="text-xl font-bold text-gray-800 mb-2">خطا در اتصال به سرور</h2>
+                <p class="text-gray-600 mb-4">لطفاً اتصال اینترنت خود را بررسی کنید</p>
+                <button onclick="location.reload()" class="bg-blue-600 text-white px-6 py-2 rounded-lg">تلاش مجدد</button>
+            </div>
+        `;
+    }
+}
+
+function startAutoRefresh() {
+    if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+    autoRefreshTimer = setInterval(async () => {
+        const changed = await loadData();
+        if (changed) {
+            render();
+        }
+    }, AUTO_REFRESH_INTERVAL);
+}
+
+function stopAutoRefresh() {
+    if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+        autoRefreshTimer = null;
+    }
+}
+
+// ============ RENDER ENGINE ============
+function render() {
+    const app = document.getElementById('app');
+    if (!currentUser) {
+        app.innerHTML = renderLogin();
+    } else if (currentUser.isAdmin) {
+        app.innerHTML = renderAdminPanel();
+    } else {
+        app.innerHTML = renderUserPanel();
+    }
+    attachEvents();
+}
+
+// ============ LOGIN PAGE ============
+function renderLogin() {
+    return `
+    <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-900 via-blue-800 to-indigo-900 p-4">
+        <div class="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md fade-in">
+            <div class="text-center mb-8">
+                <div class="w-20 h-20 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg class="w-10 h-10 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/>
+                    </svg>
+                </div>
+                <h1 class="text-2xl font-bold text-gray-800">سامانه مدیریت بخشنامه‌ها</h1>
+                <p class="text-gray-500 mt-2 text-sm">لطفاً وارد حساب کاربری خود شوید</p>
+            </div>
+            <form id="loginForm" class="space-y-5">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">انتخاب کاربر</label>
+                    <select id="loginUser" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-gray-700 bg-white">
+                        <option value="">-- کاربر را انتخاب کنید --</option>
+                        ${users.map(u => `<option value="${u.id}">${u.name} (${u.role})</option>`).join('')}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">رمز عبور</label>
+                    <input type="password" id="loginPassword" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" placeholder="رمز عبور خود را وارد کنید">
+                </div>
+                <div id="loginError" class="hidden bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"></div>
+                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-lg transition-colors duration-200 shadow-lg hover:shadow-xl cursor-pointer">
+                    ورود به سامانه
+                </button>
+            </form>
+        </div>
+    </div>`;
+}
+
+// ============ ADMIN PANEL ============
+function renderAdminPanel() {
+    const nonAdminUsers = users.filter(u => !u.isAdmin);
+    const allUsers = users;
+
+    let filtered = [...messages];
+    if (adminFilterUser !== 'all') filtered = filtered.filter(m => m.recipientId === adminFilterUser);
+    if (adminFilterStatus !== 'all') filtered = filtered.filter(m => m.status === adminFilterStatus);
+    filtered.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    const totalMessages = messages.length;
+    const pendingMessages = messages.filter(m => m.status === 'pending').length;
+    const seenMessages = messages.filter(m => m.status === 'seen').length;
+    const actedMessages = messages.filter(m => m.status === 'acted').length;
+
+    const getUserName = (id) => { const u = allUsers.find(u => u.id === id); return u ? u.name : 'نامشخص'; };
+    const statusBadge = (s) => {
+        if (s === 'pending') return '<span class="px-2 py-1 text-xs rounded-full bg-yellow-100 text-yellow-800">در انتظار</span>';
+        if (s === 'seen') return '<span class="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-800">رویت شده</span>';
+        if (s === 'acted') return '<span class="px-2 py-1 text-xs rounded-full bg-green-100 text-green-800">اقدام شده</span>';
+        return '';
+    };
+
+    let content = '';
+
+    if (adminTab === 'send') {
+        content = `
+        <div class="bg-white rounded-xl shadow-sm p-6 fade-in">
+            <h2 class="text-xl font-bold text-gray-800 mb-2">📤 ارسال بخشنامه جدید</h2>
+            <p class="text-sm text-gray-500 mb-6">می‌توانید یک بخشنامه را همزمان برای چند نفر ارسال کنید</p>
+            <form id="sendForm" class="space-y-5">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">گیرندگان</label>
+                    <div class="border border-gray-300 rounded-lg p-3 max-h-60 overflow-y-auto space-y-2" id="recipientsList">
+                        ${nonAdminUsers.map(u => `
+                            <label class="checkbox-item flex items-center gap-3 p-2 rounded-lg cursor-pointer border border-transparent ${selectedRecipients.includes(u.id) ? 'checked' : ''}">
+                                <input type="checkbox" class="recipient-checkbox w-4 h-4 text-blue-600 rounded" value="${u.id}" ${selectedRecipients.includes(u.id) ? 'checked' : ''}>
+                                <span class="text-sm font-medium text-gray-700">${u.name}</span>
+                                <span class="text-xs text-gray-400">(${u.role})</span>
+                            </label>
+                        `).join('')}
+                    </div>
+                    <div class="flex gap-2 mt-2">
+                        <button type="button" id="selectAllBtn" class="text-xs text-blue-600 hover:text-blue-800 cursor-pointer">انتخاب همه</button>
+                        <span class="text-xs text-gray-300">|</span>
+                        <button type="button" id="deselectAllBtn" class="text-xs text-blue-600 hover:text-blue-800 cursor-pointer">حذف انتخاب</button>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">عنوان بخشنامه</label>
+                    <input type="text" id="sendTitle" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500" placeholder="عنوان بخشنامه را وارد کنید">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">متن بخشنامه</label>
+                    <textarea id="sendContent" rows="8" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 resize-none" placeholder="متن بخشنامه را وارد کنید..."></textarea>
+                </div>
+                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-lg transition-colors shadow-lg cursor-pointer">
+                    📤 ارسال بخشنامه
+                </button>
+            </form>
+        </div>`;
+    }
+
+    if (adminTab === 'messages') {
+        content = `
+        <div class="space-y-4 fade-in">
+            <div class="bg-white rounded-xl shadow-sm p-4">
+                <div class="flex flex-wrap gap-4">
+                    <div class="flex-1 min-w-[200px]">
+                        <label class="block text-xs font-medium text-gray-500 mb-1">فیلتر بر اساس کاربر</label>
+                        <select id="filterUser" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                            <option value="all">همه کاربران</option>
+                            ${nonAdminUsers.map(u => `<option value="${u.id}" ${adminFilterUser === u.id ? 'selected' : ''}>${u.name}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div class="flex-1 min-w-[200px]">
+                        <label class="block text-xs font-medium text-gray-500 mb-1">فیلتر بر اساس وضعیت</label>
+                        <select id="filterStatus" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                            <option value="all" ${adminFilterStatus === 'all' ? 'selected' : ''}>همه وضعیت‌ها</option>
+                            <option value="pending" ${adminFilterStatus === 'pending' ? 'selected' : ''}>در انتظار</option>
+                            <option value="seen" ${adminFilterStatus === 'seen' ? 'selected' : ''}>رویت شده</option>
+                            <option value="acted" ${adminFilterStatus === 'acted' ? 'selected' : ''}>اقدام شده</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div class="space-y-3">
+                ${filtered.length === 0 ? `
+                    <div class="bg-white rounded-xl shadow-sm p-12 text-center">
+                        <div class="text-4xl mb-3">📭</div>
+                        <p class="text-gray-500">پیامی یافت نشد</p>
+                    </div>
+                ` : filtered.map(msg => `
+                    <div class="bg-white rounded-xl shadow-sm p-4 hover:shadow-md transition-shadow">
+                        <div class="flex items-start justify-between">
+                            <div class="flex-1 cursor-pointer message-item" data-id="${msg.id}">
+                                <div class="flex items-center gap-2 mb-1 flex-wrap">
+                                    <h3 class="font-bold text-gray-800">${msg.title}</h3>
+                                    ${statusBadge(msg.status)}
+                                </div>
+                                <p class="text-sm text-gray-500">گیرنده: ${getUserName(msg.recipientId)} | ارسال: ${formatDate(msg.createdAt)}</p>
+                            </div>
+                            <div class="flex items-center gap-1 mr-2">
+                                <button class="edit-msg-btn p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors cursor-pointer" data-id="${msg.id}" title="ویرایش">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                                </button>
+                                <button class="delete-msg-btn p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer" data-id="${msg.id}" title="حذف">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        </div>`;
+    }
+
+    if (adminTab === 'stats') {
+        content = `
+        <div class="space-y-6 fade-in">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="bg-white rounded-xl shadow-sm p-4 text-center">
+                    <div class="text-3xl font-bold text-gray-800">${totalMessages}</div>
+                    <div class="text-sm text-gray-500 mt-1">کل بخشنامه‌ها</div>
+                </div>
+                <div class="bg-yellow-50 rounded-xl shadow-sm p-4 text-center border border-yellow-200">
+                    <div class="text-3xl font-bold text-yellow-700">${pendingMessages}</div>
+                    <div class="text-sm text-yellow-600 mt-1">در انتظار</div>
+                </div>
+                <div class="bg-blue-50 rounded-xl shadow-sm p-4 text-center border border-blue-200">
+                    <div class="text-3xl font-bold text-blue-700">${seenMessages}</div>
+                    <div class="text-sm text-blue-600 mt-1">رویت شده</div>
+                </div>
+                <div class="bg-green-50 rounded-xl shadow-sm p-4 text-center border border-green-200">
+                    <div class="text-3xl font-bold text-green-700">${actedMessages}</div>
+                    <div class="text-sm text-green-600 mt-1">اقدام شده</div>
+                </div>
+            </div>
+            <div class="bg-white rounded-xl shadow-sm p-6">
+                <h3 class="text-lg font-bold text-gray-800 mb-4">📋 آمار به تفکیک کاربران</h3>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                        <thead>
+                            <tr class="border-b">
+                                <th class="text-right py-3 px-2 font-medium text-gray-600">کاربر</th>
+                                <th class="text-center py-3 px-2 font-medium text-gray-600">کل</th>
+                                <th class="text-center py-3 px-2 font-medium text-gray-600">در انتظار</th>
+                                <th class="text-center py-3 px-2 font-medium text-gray-600">رویت شده</th>
+                                <th class="text-center py-3 px-2 font-medium text-gray-600">اقدام شده</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${nonAdminUsers.map(u => {
+                                const um = messages.filter(m => m.recipientId === u.id);
+                                return `<tr class="border-b hover:bg-gray-50">
+                                    <td class="py-3 px-2 font-medium text-gray-800">${u.name}</td>
+                                    <td class="py-3 px-2 text-center font-bold">${um.length}</td>
+                                    <td class="py-3 px-2 text-center"><span class="px-2 py-1 rounded-full bg-yellow-100 text-yellow-800 text-xs">${um.filter(m => m.status === 'pending').length}</span></td>
+                                    <td class="py-3 px-2 text-center"><span class="px-2 py-1 rounded-full bg-blue-100 text-blue-800 text-xs">${um.filter(m => m.status === 'seen').length}</span></td>
+                                    <td class="py-3 px-2 text-center"><span class="px-2 py-1 rounded-full bg-green-100 text-green-800 text-xs">${um.filter(m => m.status === 'acted').length}</span></td>
+                                </tr>`;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>`;
+    }
+
+    if (adminTab === 'users') {
+        const currentCount = allUsers.length;
+        const canAddMore = currentCount < MAX_USERS;
+        content = `
+        <div class="space-y-6 fade-in">
+            <div class="bg-white rounded-xl shadow-sm p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-bold text-gray-800">➕ افزودن کاربر جدید</h3>
+                    <span class="text-xs px-3 py-1 rounded-full ${canAddMore ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">
+                        ${currentCount} / ${MAX_USERS} کاربر
+                    </span>
+                </div>
+                ${!canAddMore ? `
+                    <div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
+                        ⚠️ حداکثر ${MAX_USERS} کاربر مجاز است.
+                    </div>
+                ` : `
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">نام</label>
+                            <input type="text" id="newUserName" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="نام کاربر">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">سمت</label>
+                            <input type="text" id="newUserRole" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="سمت کاربر">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">رمز عبور</label>
+                            <input type="text" id="newUserPassword" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" placeholder="رمز عبور">
+                        </div>
+                    </div>
+                    <button id="addUserBtn" class="mt-4 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg text-sm transition-colors cursor-pointer">
+                        افزودن کاربر
+                    </button>
+                `}
+            </div>
+            <div class="bg-white rounded-xl shadow-sm p-6">
+                <h3 class="text-lg font-bold text-gray-800 mb-4">👥 لیست کاربران</h3>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                        <thead>
+                            <tr class="border-b">
+                                <th class="text-right py-3 px-2 font-medium text-gray-600">نام</th>
+                                <th class="text-right py-3 px-2 font-medium text-gray-600">سمت</th>
+                                <th class="text-right py-3 px-2 font-medium text-gray-600">رمز عبور</th>
+                                <th class="text-center py-3 px-2 font-medium text-gray-600">عملیات</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${allUsers.map(u => `
+                                <tr class="border-b hover:bg-gray-50">
+                                    <td class="py-3 px-2 font-medium text-gray-800">${u.name}</td>
+                                    <td class="py-3 px-2 text-gray-600">${u.role}</td>
+                                    <td class="py-3 px-2"><code class="bg-gray-100 px-2 py-1 rounded text-xs">${u.password}</code></td>
+                                    <td class="py-3 px-2 text-center">
+                                        ${!u.isAdmin ? `<button class="delete-user-btn text-red-600 hover:text-red-800 text-xs font-medium cursor-pointer" data-id="${u.id}">🗑️ حذف</button>` : '<span class="text-xs text-gray-400">—</span>'}
+                                    </td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>`;
+    }
+
+    return `
+    <div class="min-h-screen bg-gray-50">
+        <header class="bg-white shadow-sm border-b sticky top-0 z-40">
+            <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center">
+                        <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/>
+                        </svg>
+                    </div>
+                    <div>
+                        <h1 class="text-lg font-bold text-gray-800">پنل مدیریت</h1>
+                        <p class="text-xs text-gray-500">${currentUser.name}</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3">
+                    <div class="refresh-indicator text-xs text-green-600">● آنلاین</div>
+                    <button id="logoutBtn" class="flex items-center gap-2 px-4 py-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+                        </svg>
+                        <span class="text-sm font-medium hidden sm:inline">خروج</span>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <div class="max-w-7xl mx-auto px-4 mt-4">
+            <div class="flex gap-2 bg-white rounded-xl p-1 shadow-sm overflow-x-auto">
+                <button class="admin-tab flex-1 py-3 px-3 rounded-lg text-sm font-medium transition-colors cursor-pointer whitespace-nowrap ${adminTab === 'send' ? 'bg-blue-600 text-white shadow' : 'text-gray-600 hover:bg-gray-100'}" data-tab="send">📤 ارسال</button>
+                <button class="admin-tab flex-1 py-3 px-3 rounded-lg text-sm font-medium transition-colors cursor-pointer whitespace-nowrap ${adminTab === 'messages' ? 'bg-blue-600 text-white shadow' : 'text-gray-600 hover:bg-gray-100'}" data-tab="messages">📋 کارتابل</button>
+                <button class="admin-tab flex-1 py-3 px-3 rounded-lg text-sm font-medium transition-colors cursor-pointer whitespace-nowrap ${adminTab === 'stats' ? 'bg-blue-600 text-white shadow' : 'text-gray-600 hover:bg-gray-100'}" data-tab="stats">📊 آمار</button>
+                <button class="admin-tab flex-1 py-3 px-3 rounded-lg text-sm font-medium transition-colors cursor-pointer whitespace-nowrap ${adminTab === 'users' ? 'bg-blue-600 text-white shadow' : 'text-gray-600 hover:bg-gray-100'}" data-tab="users">👥 کاربران</button>
+            </div>
+        </div>
+
+        <div class="max-w-7xl mx-auto px-4 py-6">
+            ${content}
+        </div>
+
+        ${renderEditModal()}
+        ${renderViewModal()}
+    </div>`;
+}
+
+// ============ EDIT MODAL ============
+function renderEditModal() {
+    if (!editingMessage) return '';
+    const nonAdminUsers = users.filter(u => !u.isAdmin);
+
+    return `
+    <div class="fixed inset-0 modal-overlay flex items-center justify-center p-4 z-50" id="editModalOverlay">
+        <div class="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto fade-in">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-lg font-bold text-gray-800">✏️ ویرایش بخشنامه</h3>
+                <button id="closeEditModal" class="text-gray-400 hover:text-gray-600 cursor-pointer p-1">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <form id="editForm" class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">گیرنده</label>
+                    <select id="editRecipient" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        ${nonAdminUsers.map(u => `<option value="${u.id}" ${editingMessage.recipientId === u.id ? 'selected' : ''}>${u.name} (${u.role})</option>`).join('')}
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">عنوان</label>
+                    <input type="text" id="editTitle" value="${editingMessage.title}" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">متن بخشنامه</label>
+                    <textarea id="editContent" rows="6" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm resize-none">${editingMessage.content}</textarea>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">وضعیت</label>
+                    <select id="editStatus" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm">
+                        <option value="pending" ${editingMessage.status === 'pending' ? 'selected' : ''}>در انتظار</option>
+                        <option value="seen" ${editingMessage.status === 'seen' ? 'selected' : ''}>رویت شده</option>
+                        <option value="acted" ${editingMessage.status === 'acted' ? 'selected' : ''}>اقدام شده</option>
+                    </select>
+                </div>
+                <div class="flex gap-3 pt-2">
+                    <button type="submit" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg text-sm transition-colors cursor-pointer">💾 ذخیره</button>
+                    <button type="button" id="cancelEditBtn" class="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-2 px-4 rounded-lg text-sm transition-colors cursor-pointer">انصراف</button>
+                </div>
+            </form>
+        </div>
+    </div>`;
+}
+
+// ============ VIEW MODAL ============
+function renderViewModal() {
+    if (!selectedMessage) return '';
+    const getUserName = (id) => { const u = users.find(u => u.id === id); return u ? u.name : 'نامشخص'; };
+
+    const statusBadge = (s) => {
+        if (s === 'pending') return '<span class="px-2 py-1 text-xs rounded-full bg-yellow-100 text-yellow-800">در انتظار</span>';
+        if (s === 'seen') return '<span class="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-800">رویت شده</span>';
+        if (s === 'acted') return '<span class="px-2 py-1 text-xs rounded-full bg-green-100 text-green-800">اقدام شده</span>';
+        return '';
+    };
+
+    return `
+    <div class="fixed inset-0 modal-overlay flex items-center justify-center p-4 z-50" id="viewModalOverlay">
+        <div class="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-lg max-h-[80vh] overflow-y-auto fade-in">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-lg font-bold text-gray-800">${selectedMessage.title}</h3>
+                <button id="closeViewModal" class="text-gray-400 hover:text-gray-600 cursor-pointer p-1">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="space-y-3">
+                ${currentUser && currentUser.isAdmin ? `
+                <div class="flex items-center gap-2">
+                    <span class="text-sm text-gray-500">گیرنده:</span>
+                    <span class="font-medium text-gray-800">${getUserName(selectedMessage.recipientId)}</span>
+                </div>` : ''}
+                <div class="flex items-center gap-2">
+                    <span class="text-sm text-gray-500">وضعیت:</span>
+                    ${statusBadge(selectedMessage.status)}
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="text-sm text-gray-500">تاریخ ارسال:</span>
+                    <span class="text-sm text-gray-700">${formatDate(selectedMessage.createdAt)}</span>
+                </div>
+                ${selectedMessage.seenAt ? `<div class="flex items-center gap-2"><span class="text-sm text-gray-500">📅 تاریخ رویت:</span><span class="text-sm text-gray-700">${formatDate(selectedMessage.seenAt)}</span></div>` : ''}
+                ${selectedMessage.actedAt ? `<div class="flex items-center gap-2"><span class="text-sm text-gray-500">✅ تاریخ اقدام:</span><span class="text-sm text-gray-700">${formatDate(selectedMessage.actedAt)}</span></div>` : ''}
+                <div class="mt-4 p-4 bg-gray-50 rounded-lg border">
+                    <p class="text-sm text-gray-500 mb-2 font-medium">📄 متن بخشنامه:</p>
+                    <p class="text-gray-800 whitespace-pre-wrap leading-7">${selectedMessage.content}</p>
+                </div>
+            </div>
+        </div>
+    </div>`;
+}
+
+// ============ USER PANEL ============
+function renderUserPanel() {
+    let userMessages = messages.filter(m => m.recipientId === currentUser.id);
+
+    if (userFilter !== 'all') userMessages = userMessages.filter(m => m.status === userFilter);
+    userMessages.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    const allUserMessages = messages.filter(m => m.recipientId === currentUser.id);
+    const pendingCount = allUserMessages.filter(m => m.status === 'pending').length;
+    const seenCount = allUserMessages.filter(m => m.status === 'seen').length;
+    const actedCount = allUserMessages.filter(m => m.status === 'acted').length;
+
+    const statusBadge = (s) => {
+        if (s === 'pending') return '<span class="px-2 py-1 text-xs rounded-full bg-yellow-100 text-yellow-800">در انتظار</span>';
+        if (s === 'seen') return '<span class="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-800">رویت شده</span>';
+        if (s === 'acted') return '<span class="px-2 py-1 text-xs rounded-full bg-green-100 text-green-800">اقدام شده</span>';
+        return '';
+    };
+
+    return `
+    <div class="min-h-screen bg-gray-50">
+        <header class="bg-white shadow-sm border-b sticky top-0 z-40">
+            <div class="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 bg-indigo-600 rounded-lg flex items-center justify-center">
+                        <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+                        </svg>
+                    </div>
+                    <div>
+                        <h1 class="text-lg font-bold text-gray-800">${currentUser.name}</h1>
+                        <p class="text-xs text-gray-500">${currentUser.role}</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3">
+                    <div class="refresh-indicator text-xs text-green-600">● آنلاین</div>
+                    <button id="logoutBtn" class="flex items-center gap-2 px-4 py-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+                        </svg>
+                        <span class="text-sm font-medium hidden sm:inline">خروج</span>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        ${notification ? `
+        <div class="max-w-4xl mx-auto px-4 mt-4">
+            <div class="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg flex items-center gap-2 fade-in">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                ${notification}
+            </div>
+        </div>` : ''}
+
+        <div class="max-w-4xl mx-auto px-4 mt-4">
+            <div class="grid grid-cols-3 gap-3">
+                <div class="bg-yellow-50 border border-yellow-200 rounded-xl p-3 text-center">
+                    <div class="text-2xl font-bold text-yellow-700">${pendingCount}</div>
+                    <div class="text-xs text-yellow-600">در انتظار</div>
+                </div>
+                <div class="bg-blue-50 border border-blue-200 rounded-xl p-3 text-center">
+                    <div class="text-2xl font-bold text-blue-700">${seenCount}</div>
+                    <div class="text-xs text-blue-600">رویت شده</div>
+                </div>
+                <div class="bg-green-50 border border-green-200 rounded-xl p-3 text-center">
+                    <div class="text-2xl font-bold text-green-700">${actedCount}</div>
+                    <div class="text-xs text-green-600">اقدام شده</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="max-w-4xl mx-auto px-4 mt-4">
+            <div class="flex gap-2 bg-white rounded-xl p-1 shadow-sm overflow-x-auto">
+                <button class="user-filter flex-1 py-2 px-2 rounded-lg text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${userFilter === 'all' ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-100'}" data-filter="all">همه (${allUserMessages.length})</button>
+                <button class="user-filter flex-1 py-2 px-2 rounded-lg text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${userFilter === 'pending' ? 'bg-yellow-500 text-white' : 'text-gray-600 hover:bg-gray-100'}" data-filter="pending">⏳ انتظار (${pendingCount})</button>
+                <button class="user-filter flex-1 py-2 px-2 rounded-lg text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${userFilter === 'seen' ? 'bg-blue-500 text-white' : 'text-gray-600 hover:bg-gray-100'}" data-filter="seen">👁️ رویت (${seenCount})</button>
+                <button class="user-filter flex-1 py-2 px-2 rounded-lg text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${userFilter === 'acted' ? 'bg-green-500 text-white' : 'text-gray-600 hover:bg-gray-100'}" data-filter="acted">✅ اقدام (${actedCount})</button>
+            </div>
+        </div>
+
+        <div class="max-w-4xl mx-auto px-4 py-4 space-y-3">
+            ${userMessages.length === 0 ? `
+                <div class="bg-white rounded-xl shadow-sm p-12 text-center">
+                    <div class="text-4xl mb-3">📭</div>
+                    <p class="text-gray-500">پیامی یافت نشد</p>
+                </div>
+            ` : userMessages.map(msg => `
+                <div class="bg-white rounded-xl shadow-sm overflow-hidden hover:shadow-md transition-shadow fade-in">
+                    <div class="p-4">
+                        <div class="flex items-start justify-between mb-2">
+                            <h3 class="font-bold text-gray-800 flex-1 cursor-pointer view-msg-btn" data-id="${msg.id}">${msg.title}</h3>
+                            ${statusBadge(msg.status)}
+                        </div>
+                        <p class="text-sm text-gray-500 mb-3">${formatDate(msg.createdAt)}</p>
+                        <p class="text-gray-600 text-sm line-clamp-2 mb-4">${msg.content}</p>
+                        <div class="flex gap-2 flex-wrap">
+                            ${msg.status === 'pending' ? `
+                                <button class="seen-btn flex items-center gap-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 py-2 px-3 rounded-lg text-sm font-medium cursor-pointer" data-id="${msg.id}">👁️ رویت شد</button>
+                                <button class="acted-btn flex items-center gap-1 bg-green-50 hover:bg-green-100 text-green-700 border border-green-200 py-2 px-3 rounded-lg text-sm font-medium cursor-pointer" data-id="${msg.id}">✅ اقدام شد</button>
+                            ` : ''}
+                            ${msg.status === 'seen' ? `
+                                <button class="back-to-pending-btn flex items-center gap-1 bg-yellow-50 hover:bg-yellow-100 text-yellow-700 border border-yellow-200 py-2 px-3 rounded-lg text-sm font-medium cursor-pointer" data-id="${msg.id}">↩️ بازگشت</button>
+                                <button class="acted-btn flex items-center gap-1 bg-green-50 hover:bg-green-100 text-green-700 border border-green-200 py-2 px-3 rounded-lg text-sm font-medium cursor-pointer" data-id="${msg.id}">✅ اقدام شد</button>
+                            ` : ''}
+                            ${msg.status === 'acted' ? `
+                                <button class="back-to-seen-btn flex items-center gap-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 py-2 px-3 rounded-lg text-sm font-medium cursor-pointer" data-id="${msg.id}">↩️ بازگشت</button>
+                                <div class="flex items-center gap-1 bg-green-100 text-green-800 py-2 px-3 rounded-lg text-sm font-medium">✅ اقدام شده</div>
+                            ` : ''}
+                            <button class="view-msg-btn flex items-center gap-1 bg-gray-50 hover:bg-gray-100 text-gray-600 border border-gray-200 py-2 px-3 rounded-lg text-sm cursor-pointer" data-id="${msg.id}">📖 کامل</button>
+                        </div>
+                    </div>
+                </div>
+            `).join('')}
+        </div>
+
+        ${renderViewModal()}
+    </div>`;
+}
+
+// ============ EVENT HANDLERS ============
+function attachEvents() {
+    const loginForm = document.getElementById('loginForm');
+    if (loginForm) {
+        loginForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const userId = document.getElementById('loginUser').value;
+            const password = document.getElementById('loginPassword').value;
+            const user = users.find(u => u.id === userId);
+
+            if (!userId) {
+                document.getElementById('loginError').textContent = 'لطفاً کاربر را انتخاب کنید';
+                document.getElementById('loginError').classList.remove('hidden');
+                return;
+            }
+            if (!user || user.password !== password) {
+                document.getElementById('loginError').textContent = 'رمز عبور اشتباه است';
+                document.getElementById('loginError').classList.remove('hidden');
+                return;
+            }
+            currentUser = user;
+            sessionStorage.setItem('currentUser', JSON.stringify(user));
+            render();
+        });
+    }
+
+    const logoutBtn = document.getElementById('logoutBtn');
+    if (logoutBtn) {
+        logoutBtn.addEventListener('click', () => {
+            currentUser = null;
+            sessionStorage.removeItem('currentUser');
+            adminTab = 'send';
+            userFilter = 'all';
+            selectedMessage = null;
+            editingMessage = null;
+            selectedRecipients = [];
+            render();
+        });
+    }
+
+    document.querySelectorAll('.admin-tab').forEach(btn => {
+        btn.addEventListener('click', () => {
+            adminTab = btn.dataset.tab;
+            if (adminTab !== 'send') selectedRecipients = [];
+            render();
+        });
+    });
+
+    document.querySelectorAll('.recipient-checkbox').forEach(cb => {
+        cb.addEventListener('change', () => {
+            if (cb.checked) {
+                if (!selectedRecipients.includes(cb.value)) selectedRecipients.push(cb.value);
+            } else {
+                selectedRecipients = selectedRecipients.filter(id => id !== cb.value);
+            }
+            const label = cb.closest('.checkbox-item');
+            if (cb.checked) label.classList.add('checked');
+            else label.classList.remove('checked');
+        });
+    });
+
+    const selectAllBtn = document.getElementById('selectAllBtn');
+    if (selectAllBtn) {
+        selectAllBtn.addEventListener('click', () => {
+            const nonAdminUsers = users.filter(u => !u.isAdmin);
+            selectedRecipients = nonAdminUsers.map(u => u.id);
+            render();
+        });
+    }
+    const deselectAllBtn = document.getElementById('deselectAllBtn');
+    if (deselectAllBtn) {
+        deselectAllBtn.addEventListener('click', () => {
+            selectedRecipients = [];
+            render();
+        });
+    }
+
+    const sendForm = document.getElementById('sendForm');
+    if (sendForm) {
+        sendForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const title = document.getElementById('sendTitle').value.trim();
+            const content = document.getElementById('sendContent').value.trim();
+
+            if (selectedRecipients.length === 0) {
+                alert('لطفاً حداقل یک گیرنده انتخاب کنید');
+                return;
+            }
+            if (!title || !content) {
+                alert('لطفاً عنوان و متن بخشنامه را وارد کنید');
+                return;
+            }
+
+            for (const recipientId of selectedRecipients) {
+                await api.addMessage({
+                    id: generateId(),
+                    title, content,
+                    recipientId,
+                    senderId: currentUser.id,
+                    createdAt: new Date().toISOString(),
+                    status: 'pending'
+                });
+            }
+
+            selectedRecipients = [];
+            showNotification('✅ بخشنامه با موفقیت ارسال شد!');
+            adminTab = 'messages';
+            await loadData();
+            render();
+        });
+    }
+
+    const filterUser = document.getElementById('filterUser');
+    if (filterUser) {
+        filterUser.addEventListener('change', () => { adminFilterUser = filterUser.value; render(); });
+    }
+    const filterStatus = document.getElementById('filterStatus');
+    if (filterStatus) {
+        filterStatus.addEventListener('change', () => { adminFilterStatus = filterStatus.value; render(); });
+    }
+
+    document.querySelectorAll('.message-item').forEach(item => {
+        item.addEventListener('click', () => {
+            selectedMessage = messages.find(m => m.id === item.dataset.id);
+            render();
+        });
+    });
+
+    document.querySelectorAll('.edit-msg-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            editingMessage = messages.find(m => m.id === btn.dataset.id);
+            render();
+        });
+    });
+
+    document.querySelectorAll('.delete-msg-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (confirm('آیا از حذف این بخشنامه مطمئن هستید؟')) {
+                await api.deleteMessage(btn.dataset.id);
+                showNotification('🗑️ بخشنامه حذف شد');
+                await loadData();
+                render();
+            }
+        });
+    });
+
+    const editForm = document.getElementById('editForm');
+    if (editForm) {
+        editForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const newRecipient = document.getElementById('editRecipient').value;
+            const newTitle = document.getElementById('editTitle').value.trim();
+            const newContent = document.getElementById('editContent').value.trim();
+            const newStatus = document.getElementById('editStatus').value;
+
+            if (!newTitle || !newContent) {
+                alert('لطفاً عنوان و متن را وارد کنید');
+                return;
+            }
+
+            const updates = {
+                recipientId: newRecipient,
+                title: newTitle,
+                content: newContent,
+                status: newStatus,
+            };
+
+            if (newStatus === 'seen' && !editingMessage.seenAt) updates.seenAt = new Date().toISOString();
+            if (newStatus === 'acted' && !editingMessage.actedAt) updates.actedAt = new Date().toISOString();
+
+            await api.updateMessage(editingMessage.id, updates);
+            editingMessage = null;
+            showNotification('✅ تغییرات ذخیره شد');
+            await loadData();
+            render();
+        });
+    }
+
+    const closeEditModal = document.getElementById('closeEditModal');
+    if (closeEditModal) closeEditModal.addEventListener('click', () => { editingMessage = null; render(); });
+    const cancelEditBtn = document.getElementById('cancelEditBtn');
+    if (cancelEditBtn) cancelEditBtn.addEventListener('click', () => { editingMessage = null; render(); });
+    const editModalOverlay = document.getElementById('editModalOverlay');
+    if (editModalOverlay) editModalOverlay.addEventListener('click', (e) => { if (e.target === editModalOverlay) { editingMessage = null; render(); } });
+
+    document.querySelectorAll('.user-filter').forEach(btn => {
+        btn.addEventListener('click', () => { userFilter = btn.dataset.filter; render(); });
+    });
+
+    document.querySelectorAll('.seen-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            await api.updateMessage(btn.dataset.id, { status: 'seen', seenAt: new Date().toISOString() });
+            showNotification('✅ پیام به عنوان رویت شده علامت‌گذاری شد');
+            await loadData();
+            render();
+        });
+    });
+
+    document.querySelectorAll('.acted-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            await api.updateMessage(btn.dataset.id, { status: 'acted', actedAt: new Date().toISOString() });
+            showNotification('✅ پیام به عنوان اقدام شده علامت‌گذاری شد');
+            await loadData();
+            render();
+        });
+    });
+
+    document.querySelectorAll('.back-to-pending-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            await api.updateMessage(btn.dataset.id, { status: 'pending', seenAt: null });
+            showNotification('↩️ وضعیت به "در انتظار" برگردانده شد');
+            await loadData();
+            render();
+        });
+    });
+
+    document.querySelectorAll('.back-to-seen-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            await api.updateMessage(btn.dataset.id, { status: 'seen', actedAt: null });
+            showNotification('↩️ وضعیت به "رویت شده" برگردانده شد');
+            await loadData();
+            render();
+        });
+    });
+
+    document.querySelectorAll('.view-msg-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            selectedMessage = messages.find(m => m.id === btn.dataset.id);
+            render();
+        });
+    });
+
+    const closeViewModal = document.getElementById('closeViewModal');
+    if (closeViewModal) closeViewModal.addEventListener('click', () => { selectedMessage = null; render(); });
+    const viewModalOverlay = document.getElementById('viewModalOverlay');
+    if (viewModalOverlay) viewModalOverlay.addEventListener('click', (e) => { if (e.target === viewModalOverlay) { selectedMessage = null; render(); } });
+
+    const addUserBtn = document.getElementById('addUserBtn');
+    if (addUserBtn) {
+        addUserBtn.addEventListener('click', async () => {
+            const name = document.getElementById('newUserName').value.trim();
+            const role = document.getElementById('newUserRole').value.trim();
+            const password = document.getElementById('newUserPassword').value.trim();
+            if (!name || !role || !password) {
+                alert('لطفاً تمام فیلدها را پر کنید');
+                return;
+            }
+
+            await api.addUser({ id: generateId(), name, role, password, isAdmin: false });
+            showNotification('✅ کاربر جدید اضافه شد!');
+            await loadData();
+            render();
+        });
+    }
+
+    document.querySelectorAll('.delete-user-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            if (confirm('آیا از حذف این کاربر مطمئن هستید؟')) {
+                await api.deleteUser(btn.dataset.id);
+                showNotification('🗑️ کاربر حذف شد');
+                await loadData();
+                render();
+            }
+        });
+    });
+}
+
+function showNotification(msg) {
+    notification = msg;
+    if (notificationTimeout) clearTimeout(notificationTimeout);
+    notificationTimeout = setTimeout(() => {
+        notification = '';
+        render();
+    }, 3000);
+}
+
+// ============ INIT ============
+initializeApp();
+</script>
+
+</body>
+</html>
